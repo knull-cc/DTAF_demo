@@ -56,6 +56,21 @@ To also write test-window predictions:
 python run.py --root_path ./dataset --data_path ETTh1.csv --save_predictions
 ```
 
+To export DTAF trend decomposition tensors for inspection:
+
+```bash
+python run.py \
+  --mode test \
+  --root_path ./dataset/ETT-small/ \
+  --data_path ETTh1.csv \
+  --checkpoint ./checkpoints/ETTh1_96_96/dtaf_best.pt \
+  --analyze_trend \
+  --trend_batches 4
+```
+
+This writes `trend_analysis.npz` and `trend_summary.csv` under the checkpoint
+folder without changing model predictions.
+
 ## Evaluate Or Predict From A Checkpoint
 
 ```bash

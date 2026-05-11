@@ -28,6 +28,9 @@ class StandardScaler:
     def transform(self, data: np.ndarray) -> np.ndarray:
         return (data - self.mean_) / self.scale_
 
+    def inverse_transform(self, data: np.ndarray) -> np.ndarray:
+        return data * self.scale_ + self.mean_
+
     def inverse_target(self, data: np.ndarray, target_indices: Sequence[int]) -> np.ndarray:
         target_indices = np.asarray(target_indices)
         return data * self.scale_[target_indices] + self.mean_[target_indices]
@@ -436,6 +439,156 @@ def evaluate(
     return {"mse": mse, "mae": mae}, rows
 
 
+def trend_output_dir(args) -> str:
+    if args.trend_output_dir:
+        return args.trend_output_dir
+    checkpoint_dir = os.path.dirname(checkpoint_path(args))
+    if checkpoint_dir:
+        return os.path.join(checkpoint_dir, "trend_analysis")
+    return os.path.join(args.output_dir, "trend_analysis")
+
+
+def to_numpy(value):
+    if torch.is_tensor(value):
+        return value.detach().cpu().numpy()
+    if isinstance(value, np.ndarray):
+        return value
+    return None
+
+
+def flatten_analysis(value, prefix: str, out: Dict[str, np.ndarray]) -> None:
+    array = to_numpy(value)
+    if array is not None:
+        out[prefix] = array
+        return
+    if isinstance(value, dict):
+        for key, child in value.items():
+            flatten_analysis(child, f"{prefix}.{key}", out)
+        return
+    if isinstance(value, list):
+        for index, child in enumerate(value):
+            flatten_analysis(child, f"{prefix}.{index}", out)
+
+
+def append_payload(payload: Dict[str, List[np.ndarray]], key: str, value) -> None:
+    array = to_numpy(value)
+    if array is not None:
+        payload.setdefault(key, []).append(array)
+
+
+def append_trend_summary(
+    rows: List[Dict[str, object]],
+    analysis: Dict[str, object],
+    batch_indices: Sequence[int],
+    selected_columns: Sequence[str],
+) -> None:
+    n_channels = len(selected_columns)
+    for layer_index, layer in enumerate(analysis["layers"]):
+        for branch_name in ["history_components", "current_components"]:
+            components = layer[branch_name]
+            trend = to_numpy(components["trend_init"])
+            seasonal = to_numpy(components["seasonal_init"])
+            if trend is None or seasonal is None:
+                continue
+            batch_size = len(batch_indices)
+            trend = trend.reshape(batch_size, n_channels, trend.shape[-2], trend.shape[-1])
+            seasonal = seasonal.reshape(
+                batch_size, n_channels, seasonal.shape[-2], seasonal.shape[-1]
+            )
+            trend_std = trend.std(axis=(2, 3))
+            seasonal_std = seasonal.std(axis=(2, 3))
+            trend_abs = np.abs(trend).mean(axis=(2, 3))
+            seasonal_abs = np.abs(seasonal).mean(axis=(2, 3))
+            trend_ratio = trend_abs / (trend_abs + seasonal_abs + 1e-8)
+
+            for batch_pos, sample_index in enumerate(batch_indices):
+                for channel_index, channel_name in enumerate(selected_columns):
+                    rows.append(
+                        {
+                            "sample": int(sample_index),
+                            "layer": layer_index,
+                            "branch": branch_name.replace("_components", ""),
+                            "channel": channel_name,
+                            "trend_std": float(trend_std[batch_pos, channel_index]),
+                            "seasonal_std": float(seasonal_std[batch_pos, channel_index]),
+                            "trend_abs_mean": float(trend_abs[batch_pos, channel_index]),
+                            "seasonal_abs_mean": float(
+                                seasonal_abs[batch_pos, channel_index]
+                            ),
+                            "trend_ratio": float(trend_ratio[batch_pos, channel_index]),
+                        }
+                    )
+
+
+@torch.no_grad()
+def analyze_trend(
+    model: nn.Module,
+    loader: DataLoader,
+    scaler: StandardScaler,
+    selected_columns: Sequence[str],
+    target_indices: Sequence[int],
+    target_names: Sequence[str],
+    args,
+    device: torch.device,
+) -> None:
+    model.eval()
+    target_indices_tensor = torch.as_tensor(target_indices, dtype=torch.long, device=device)
+    payload: Dict[str, List[np.ndarray]] = {}
+    summary_rows: List[Dict[str, object]] = []
+
+    for batch_id, (x, y, indices) in enumerate(loader):
+        if batch_id >= args.trend_batches:
+            break
+
+        x = x.float()
+        y = y.float()
+        output, _, analysis = model(x.to(device), return_analysis=True)
+        pred = output.index_select(-1, target_indices_tensor).cpu().numpy()
+        true = y.index_select(-1, target_indices_tensor.cpu()).numpy()
+        x_np = x.numpy()
+        y_np = y.numpy()
+
+        append_payload(payload, "sample_index", indices.numpy())
+        append_payload(payload, "input", x_np)
+        append_payload(payload, "target", y_np)
+        append_payload(payload, "prediction_target", pred)
+        append_payload(payload, "target_selected", true)
+        append_payload(payload, "input_original", scaler.inverse_transform(x_np))
+        append_payload(payload, "target_original", scaler.inverse_transform(y_np))
+        append_payload(payload, "prediction_target_original", scaler.inverse_target(pred, target_indices))
+        append_payload(payload, "target_selected_original", scaler.inverse_target(true, target_indices))
+
+        flat_analysis: Dict[str, np.ndarray] = {}
+        flatten_analysis(analysis, "analysis", flat_analysis)
+        for key, value in flat_analysis.items():
+            append_payload(payload, key, value)
+        append_trend_summary(
+            summary_rows,
+            analysis,
+            indices.tolist(),
+            selected_columns,
+        )
+
+    if not payload:
+        print("trend analysis skipped: no batches were available", flush=True)
+        return
+
+    out_dir = trend_output_dir(args)
+    os.makedirs(out_dir, exist_ok=True)
+    npz_path = os.path.join(out_dir, "trend_analysis.npz")
+    csv_path = os.path.join(out_dir, "trend_summary.csv")
+    np.savez_compressed(
+        npz_path,
+        **{key: np.concatenate(values, axis=0) for key, values in payload.items()},
+    )
+    pd.DataFrame(summary_rows).to_csv(csv_path, index=False)
+    print_section("trend analysis")
+    print(f"trend_batches: {args.trend_batches}", flush=True)
+    print(f"targets: {list(target_names)}", flush=True)
+    print(f"saved_npz: {npz_path}", flush=True)
+    print(f"saved_summary: {csv_path}", flush=True)
+
+
 def build_model(args, n_features: int) -> DTAF:
     config = DTAFConfig(
         seq_len=args.seq_len,
@@ -590,6 +743,17 @@ def train(args) -> None:
         pred_path = os.path.join(args.output_dir, "test_predictions.csv")
         pd.DataFrame(rows).to_csv(pred_path, index=False)
         print(f"test predictions saved: {pred_path}", flush=True)
+    if args.analyze_trend:
+        analyze_trend(
+            model,
+            loaders["test"],
+            scaler,
+            selected_columns,
+            target_indices,
+            target_names,
+            args,
+            device,
+        )
     print_separator()
 
 
@@ -630,6 +794,17 @@ def test(args) -> None:
         pred_path = os.path.join(args.output_dir, "test_predictions.csv")
         pd.DataFrame(rows).to_csv(pred_path, index=False)
         print(f"test predictions saved: {pred_path}", flush=True)
+    if args.analyze_trend:
+        analyze_trend(
+            model,
+            loaders["test"],
+            scaler,
+            selected_columns,
+            target_indices,
+            target_names,
+            args,
+            device,
+        )
     print_separator()
 
 
@@ -737,6 +912,9 @@ def parse_args():
     parser.add_argument("--checkpoints", "--output_dir", dest="output_dir", type=str, default="./checkpoints")
     parser.add_argument("--checkpoint", type=str, default=None)
     parser.add_argument("--save_predictions", action="store_true")
+    parser.add_argument("--analyze_trend", action="store_true")
+    parser.add_argument("--trend_batches", type=int, default=4)
+    parser.add_argument("--trend_output_dir", type=str, default=None)
     parser.add_argument("--seed", type=int, default=2024)
     parser.add_argument("--num_workers", type=int, default=0)
     parser.add_argument("--use_gpu", type=int, default=1)

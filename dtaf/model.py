@@ -99,9 +99,19 @@ class LinearExtractor(nn.Module):
             (1 / self.seq_len) * torch.ones([self.pred_len, self.seq_len])
         )
 
-    def forward(self, x):
+    def forward(self, x, return_components=False):
         seasonal_init, trend_init = self.decomposition(x)
-        return self.linear_seasonal(seasonal_init) + self.linear_trend(trend_init)
+        seasonal_out = self.linear_seasonal(seasonal_init)
+        trend_out = self.linear_trend(trend_init)
+        out = seasonal_out + trend_out
+        if return_components:
+            return out, {
+                "seasonal_init": seasonal_init,
+                "trend_init": trend_init,
+                "seasonal_out": seasonal_out,
+                "trend_out": trend_out,
+            }
+        return out
 
 
 class KANLinear(nn.Module):
@@ -297,13 +307,21 @@ class TFS(nn.Module):
             else None
         )
 
-    def forward(self, x):
+    def forward(self, x, return_analysis=False):
         origin = x
         if self.moe is not None:
             x = x - self.moe(x)
 
-        history = self.extractor_his(x)
-        current_weight = self.gate(self.extractor_cur(origin)).repeat(
+        if return_analysis:
+            history, history_components = self.extractor_his(x, return_components=True)
+            current_features, current_components = self.extractor_cur(
+                origin, return_components=True
+            )
+        else:
+            history = self.extractor_his(x)
+            current_features = self.extractor_cur(origin)
+
+        current_weight = self.gate(current_features).repeat(
             1, 1, origin.shape[-1]
         )
         weight = self.weight_linear(history).softmax(dim=-1)
@@ -314,6 +332,20 @@ class TFS(nn.Module):
         out = history_out + current_out
         if self.norm is not None:
             out = self.norm(out)
+        if return_analysis:
+            return out, x, {
+                "stable_input": x,
+                "history": history,
+                "current_features": current_features,
+                "history_components": history_components,
+                "current_components": current_components,
+                "aggregation_weight": weight,
+                "aggregated": aggregated,
+                "history_out": history_out,
+                "current_weight": current_weight,
+                "current_out": current_out,
+                "tfs_out": out,
+            }
         return out, x
 
 
@@ -387,16 +419,33 @@ class DTAF(nn.Module):
         stdev = torch.sqrt(torch.var(x, dim=1, keepdim=True, unbiased=False) + 1e-5)
         return x / stdev, means, stdev
 
-    def forward(self, x_enc):
+    def forward(self, x_enc, return_analysis=False):
         batch_size, _, n_vars = x_enc.size()
         x_enc, means, stdev = self._normalize(x_enc)
 
         enc_out, _ = self.patch_embedding(x_enc.transpose(1, 2))
         enc_out_tfs = enc_out
         stables = None
+        analysis = None
+        if return_analysis:
+            analysis = {
+                "normalized_input": x_enc,
+                "patch_embedding": enc_out,
+                "layers": [],
+            }
         for tfs in self.tfss:
-            aggregated, stables = tfs(enc_out_tfs)
+            layer_input = enc_out_tfs
+            if return_analysis:
+                aggregated, stables, layer_analysis = tfs(
+                    enc_out_tfs, return_analysis=True
+                )
+            else:
+                aggregated, stables = tfs(enc_out_tfs)
             enc_out_tfs = self.norm(self.drop(aggregated) + enc_out_tfs)
+            if return_analysis:
+                layer_analysis["layer_input"] = layer_input
+                layer_analysis["layer_output"] = enc_out_tfs
+                analysis["layers"].append(layer_analysis)
 
         h_t = enc_out_tfs
         freq = torch.fft.rfft(enc_out_tfs, dim=-1)
@@ -422,6 +471,13 @@ class DTAF(nn.Module):
 
         h_f = self.frequency_attention(h_f)
         h_t = self.frequency_attention(h_t)
+        if return_analysis:
+            analysis["tfs_output"] = enc_out_tfs
+            analysis["wave"] = wave
+            analysis["topk_indices"] = topk_indices
+            analysis["temporal_branch"] = h_t
+            analysis["frequency_branch"] = h_f
+            analysis["stables"] = stables
         enc_out = torch.cat([h_t, h_f], dim=-2)
 
         enc_out = torch.reshape(
@@ -431,4 +487,7 @@ class DTAF(nn.Module):
         out = self.predictor(enc_out).permute(0, 2, 1)
         out = out * stdev[:, 0, :].unsqueeze(1).repeat(1, self.config.pred_len, 1)
         out = out + means[:, 0, :].unsqueeze(1).repeat(1, self.config.pred_len, 1)
+        if return_analysis:
+            analysis["prediction"] = out
+            return out, stables, analysis
         return out, stables
