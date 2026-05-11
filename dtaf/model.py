@@ -483,7 +483,7 @@ class DTAF(nn.Module):
         h_f, wave, topk_indices = self._frequency_wave(enc_out_tfs)
 
         h_f = self.frequency_attention(h_f)
-        h_t = self.temporal_attention(h_t)
+        h_t = self.frequency_attention(h_t)
         if return_analysis:
             analysis["tfs_output"] = enc_out_tfs
             analysis["wave"] = wave
