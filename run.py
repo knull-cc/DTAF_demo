@@ -124,6 +124,52 @@ def choose_device(args) -> torch.device:
     return torch.device("cpu")
 
 
+def print_separator() -> None:
+    print("-" * 80, flush=True)
+
+
+def print_section(title: str) -> None:
+    print_separator()
+    print(title, flush=True)
+    print_separator()
+
+
+def print_args(args) -> None:
+    print_section("loaded arguments")
+    for key, value in sorted(vars(args).items()):
+        print(f"{key}: {value}", flush=True)
+
+
+def format_metrics(metrics: Dict[str, float]) -> str:
+    return f"mae {metrics['mae']:.6f} | mse {metrics['mse']:.6f}"
+
+
+def adjust_learning_rate(optimizer: torch.optim.Optimizer, epoch: int, args) -> None:
+    if args.lradj == "none":
+        return
+    if args.lradj == "type1":
+        lr = args.lr * (0.5 ** ((epoch - 1) // 1))
+    elif args.lradj == "type2":
+        lr_by_epoch = {
+            2: 5e-5,
+            4: 1e-5,
+            6: 5e-6,
+            8: 1e-6,
+            10: 5e-7,
+            15: 1e-7,
+            20: 5e-8,
+        }
+        if epoch not in lr_by_epoch:
+            return
+        lr = lr_by_epoch[epoch]
+    else:
+        raise ValueError("lradj must be one of: none, type1, type2")
+
+    for param_group in optimizer.param_groups:
+        param_group["lr"] = lr
+    print(f"learning_rate {lr:.8g}", flush=True)
+
+
 def read_itransformer_csv(
     args,
     selected_columns: Optional[Sequence[str]] = None,
@@ -176,6 +222,20 @@ def read_itransformer_csv(
 
 
 def split_borders(n: int, args) -> Dict[str, Tuple[int, int]]:
+    if args.split == "ett":
+        train_end = 12 * 30 * 24
+        val_end = train_end + 4 * 30 * 24
+        test_end = val_end + 4 * 30 * 24
+        if n < test_end:
+            raise ValueError(
+                f"ETT split requires at least {test_end} rows, but dataset has {n}."
+            )
+        return {
+            "train": (0, train_end),
+            "val": (train_end - args.seq_len, val_end),
+            "test": (val_end - args.seq_len, test_end),
+        }
+
     train_ratio, val_ratio, test_ratio = args.train_ratio, args.val_ratio, args.test_ratio
     ratio_sum = train_ratio + val_ratio + test_ratio
     if not np.isclose(ratio_sum, 1.0):
@@ -220,7 +280,7 @@ def make_loaders(
             batch_size=args.batch_size,
             shuffle=shuffle_train,
             num_workers=args.num_workers,
-            drop_last=False,
+            drop_last=args.drop_last,
         ),
         "val": DataLoader(
             datasets["val"],
@@ -246,8 +306,11 @@ def channel_mixup(x: torch.Tensor, y: torch.Tensor, sigma: float):
 
     batch_size, seq_len, num_channels = x.shape
     horizon = y.shape[1]
-    perm = torch.stack(
-        [torch.randperm(num_channels, device=x.device) for _ in range(batch_size)]
+    perm = torch.randint(
+        low=0,
+        high=num_channels,
+        size=(batch_size, num_channels),
+        device=x.device,
     ).unsqueeze(-2)
     lam = torch.normal(
         mean=0.0,
@@ -261,9 +324,19 @@ def channel_mixup(x: torch.Tensor, y: torch.Tensor, sigma: float):
 
 
 def kl_loss(stables: torch.Tensor, sample_num: int) -> torch.Tensor:
-    if sample_num > 0 and sample_num < stables.shape[0]:
-        index = torch.randperm(stables.shape[0], device=stables.device)[:sample_num]
-        stables = stables.index_select(0, index)
+    if sample_num > 0:
+        shuffle = torch.randint(
+            low=0,
+            high=stables.shape[0],
+            size=(stables.shape[0],),
+            device=stables.device,
+        )
+        shuffle = (
+            shuffle.unsqueeze(-1)
+            .unsqueeze(-1)[:sample_num]
+            .repeat(1, stables.shape[1], stables.shape[2])
+        )
+        stables = torch.gather(stables, dim=0, index=shuffle)
     probs = stables.softmax(dim=-1)
     log_probs = torch.log(probs + 1e-8)
     p_i = probs.unsqueeze(2)
@@ -300,12 +373,13 @@ def train_one_epoch(
         if args.r_dropout > 0 or args.kl > 0:
             output_r, stables_r = model(x)
             pred_r = output_r.index_select(-1, target_indices_tensor)
-            loss = 0.5 * (loss + criterion(pred_r, target))
+            loss = loss + criterion(pred_r, target) / 2
             if args.r_dropout > 0:
                 loss = loss + args.r_dropout * mse(pred, pred_r)
             if args.kl > 0:
-                loss = loss + args.kl * 0.5 * (
-                    kl_loss(stables, args.sample_num) + kl_loss(stables_r, args.sample_num)
+                loss = loss + args.kl * (
+                    kl_loss(stables, args.sample_num)
+                    + kl_loss(stables_r, args.sample_num) / 2
                 )
 
         loss.backward()
@@ -423,6 +497,7 @@ def checkpoint_path(args) -> str:
 
 
 def train(args) -> None:
+    print_args(args)
     set_seed(args.seed)
     device = choose_device(args)
     values, dates, selected_columns, target_indices, target_names = read_itransformer_csv(args)
@@ -436,12 +511,15 @@ def train(args) -> None:
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     stopper = EarlyStopping(args.patience)
 
-    print(f"device: {device}")
-    print(f"features: {args.features} | columns: {len(selected_columns)} | targets: {target_names}")
-    print(f"windows: train={len(datasets['train'])}, val={len(datasets['val'])}, test={len(datasets['test'])}")
-    print(f"parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
+    print_section("run summary")
+    print(f"device: {device}", flush=True)
+    print(f"features: {args.features} | columns: {len(selected_columns)} | targets: {target_names}", flush=True)
+    print(f"windows: train={len(datasets['train'])}, val={len(datasets['val'])}, test={len(datasets['test'])}", flush=True)
+    print(f"parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}", flush=True)
 
-    best_metrics = {}
+    print_section("training")
+    best_metrics = None
+    best_epoch = None
     for epoch in range(1, args.num_epochs + 1):
         train_loss = train_one_epoch(
             model, loaders["train"], optimizer, target_indices, args, device
@@ -457,16 +535,26 @@ def train(args) -> None:
         )
         print(
             f"epoch {epoch:03d} | train_loss {train_loss:.6f} | "
-            f"val_mae {val_metrics['mae']:.6f} | val_mse {val_metrics['mse']:.6f}"
+            f"val_{format_metrics(val_metrics)}",
+            flush=True,
         )
+        improved = stopper.best is None or val_metrics["mae"] < stopper.best - stopper.min_delta
         if stopper.step(val_metrics["mae"], model):
-            print(f"early stopping at epoch {epoch}")
+            print(f"early stopping at epoch {epoch}", flush=True)
             break
-        best_metrics = val_metrics
+        if improved:
+            best_metrics = val_metrics
+            best_epoch = epoch
+        adjust_learning_rate(optimizer, epoch, args)
 
     if stopper.best_state is not None:
         model.load_state_dict(stopper.best_state)
 
+    if best_metrics is not None:
+        print_section("best validation")
+        print(f"epoch {best_epoch:03d} | val_{format_metrics(best_metrics)}", flush=True)
+
+    print_section("test")
     test_metrics, rows = evaluate(
         model,
         loaders["test"],
@@ -477,7 +565,7 @@ def train(args) -> None:
         device,
         collect_predictions=args.save_predictions,
     )
-    print(f"test_mae {test_metrics['mae']:.6f} | test_mse {test_metrics['mse']:.6f}")
+    print(f"test_{format_metrics(test_metrics)}", flush=True)
 
     path = checkpoint_path(args)
     save_checkpoint(
@@ -488,20 +576,21 @@ def train(args) -> None:
         selected_columns,
         target_indices,
         target_names,
-        {"val": best_metrics, "test": test_metrics},
+        {"best_epoch": best_epoch, "val": best_metrics, "test": test_metrics},
     )
-    print(f"checkpoint saved: {path}")
+    print(f"checkpoint saved: {path}", flush=True)
 
     os.makedirs(args.output_dir, exist_ok=True)
     metrics_path = os.path.join(args.output_dir, "metrics.json")
     with open(metrics_path, "w", encoding="utf-8") as f:
-        json.dump({"val": best_metrics, "test": test_metrics}, f, indent=2)
-    print(f"metrics saved: {metrics_path}")
+        json.dump({"best_epoch": best_epoch, "val": best_metrics, "test": test_metrics}, f, indent=2)
+    print(f"metrics saved: {metrics_path}", flush=True)
 
     if args.save_predictions:
         pred_path = os.path.join(args.output_dir, "test_predictions.csv")
         pd.DataFrame(rows).to_csv(pred_path, index=False)
-        print(f"test predictions saved: {pred_path}")
+        print(f"test predictions saved: {pred_path}", flush=True)
+    print_separator()
 
 
 def test(args) -> None:
@@ -509,6 +598,10 @@ def test(args) -> None:
     ckpt = load_checkpoint(checkpoint_path(args), device)
     args.seq_len = ckpt["model_config"]["seq_len"]
     args.pred_len = ckpt["model_config"]["pred_len"]
+    print_args(args)
+    print_section("checkpoint")
+    print(f"checkpoint: {checkpoint_path(args)}", flush=True)
+    print(f"checkpoint_metrics: {ckpt.get('metrics')}", flush=True)
     values, dates, selected_columns, target_indices, target_names = read_itransformer_csv(
         args, ckpt["selected_columns"], ckpt["target_names"]
     )
@@ -517,6 +610,10 @@ def test(args) -> None:
 
     model = DTAF(DTAFConfig(**ckpt["model_config"])).to(device)
     model.load_state_dict(ckpt["model_state"])
+    print_section("test")
+    print(f"device: {device}", flush=True)
+    print(f"features: {args.features} | columns: {len(selected_columns)} | targets: {target_names}", flush=True)
+    print(f"windows: test={len(datasets['test'])}", flush=True)
     metrics, rows = evaluate(
         model,
         loaders["test"],
@@ -527,12 +624,13 @@ def test(args) -> None:
         device,
         collect_predictions=args.save_predictions,
     )
-    print(f"test_mae {metrics['mae']:.6f} | test_mse {metrics['mse']:.6f}")
+    print(f"test_{format_metrics(metrics)}", flush=True)
     if args.save_predictions:
         os.makedirs(args.output_dir, exist_ok=True)
         pred_path = os.path.join(args.output_dir, "test_predictions.csv")
         pd.DataFrame(rows).to_csv(pred_path, index=False)
-        print(f"test predictions saved: {pred_path}")
+        print(f"test predictions saved: {pred_path}", flush=True)
+    print_separator()
 
 
 def pandas_freq(freq: str) -> str:
@@ -553,6 +651,10 @@ def predict(args) -> None:
     ckpt = load_checkpoint(checkpoint_path(args), device)
     args.seq_len = ckpt["model_config"]["seq_len"]
     args.pred_len = ckpt["model_config"]["pred_len"]
+    print_args(args)
+    print_section("checkpoint")
+    print(f"checkpoint: {checkpoint_path(args)}", flush=True)
+    print(f"checkpoint_metrics: {ckpt.get('metrics')}", flush=True)
     values, dates, selected_columns, target_indices, target_names = read_itransformer_csv(
         args, ckpt["selected_columns"], ckpt["target_names"]
     )
@@ -582,7 +684,10 @@ def predict(args) -> None:
     os.makedirs(args.output_dir, exist_ok=True)
     pred_path = os.path.join(args.output_dir, "future_predictions.csv")
     pd.DataFrame(rows).to_csv(pred_path, index=False)
-    print(f"future predictions saved: {pred_path}")
+    print_section("predict")
+    print(f"device: {device}", flush=True)
+    print(f"future_predictions saved: {pred_path}", flush=True)
+    print_separator()
 
 
 def parse_args():
@@ -605,6 +710,7 @@ def parse_args():
     parser.add_argument("--learning_rate", "--lr", dest="lr", type=float, default=5e-4)
     parser.add_argument("--weight_decay", type=float, default=1e-5)
     parser.add_argument("--clip_grad", type=float, default=0.0)
+    parser.add_argument("--lradj", type=str, default="none", choices=["none", "type1", "type2"])
 
     parser.add_argument("--d_model", type=int, default=32)
     parser.add_argument("--e_layers", type=int, default=1)
@@ -625,6 +731,8 @@ def parse_args():
     parser.add_argument("--train_ratio", type=float, default=0.7)
     parser.add_argument("--val_ratio", type=float, default=0.1)
     parser.add_argument("--test_ratio", type=float, default=0.2)
+    parser.add_argument("--split", type=str, default="ratio", choices=["ratio", "ett"])
+    parser.add_argument("--drop_last", action="store_true")
 
     parser.add_argument("--checkpoints", "--output_dir", dest="output_dir", type=str, default="./checkpoints")
     parser.add_argument("--checkpoint", type=str, default=None)

@@ -421,7 +421,7 @@ class DTAF(nn.Module):
         h_f[:, 0, :] = enc_out_tfs[:, 0, :]
 
         h_f = self.frequency_attention(h_f)
-        h_t = self.temporal_attention(h_t)
+        h_t = self.frequency_attention(h_t)
         enc_out = torch.cat([h_t, h_f], dim=-2)
 
         enc_out = torch.reshape(
