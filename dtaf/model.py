@@ -22,12 +22,6 @@ class DTAFConfig:
     aggregated_norm: int = 1
     expert_num: int = 2
     kan_div: int = 4
-    tfs_variant: str = "original"
-    trend_moe: str = "none"
-    seasonal_moe: str = "full"
-    trend_current_scale: float = 0.1
-    seasonal_history_scale: float = 0.2
-    decouple_fusion: str = "sum"
 
 
 class PositionalEmbedding(nn.Module):
@@ -117,20 +111,6 @@ class LinearExtractor(nn.Module):
                 "seasonal_out": seasonal_out,
                 "trend_out": trend_out,
             }
-        return out
-
-
-class SimpleExtractor(nn.Module):
-    def __init__(self, input_dim):
-        super().__init__()
-        self.linear = nn.Linear(input_dim, input_dim)
-        nn.init.eye_(self.linear.weight)
-        nn.init.zeros_(self.linear.bias)
-
-    def forward(self, x, return_components=False):
-        out = self.linear(x)
-        if return_components:
-            return out, {"linear_out": out}
         return out
 
 
@@ -369,74 +349,6 @@ class TFS(nn.Module):
         return out, x
 
 
-class BranchTFS(nn.Module):
-    def __init__(
-        self,
-        input_dim,
-        configs,
-        patch_num,
-        extractor,
-        moe_scale,
-        history_scale,
-        current_scale,
-    ):
-        super().__init__()
-        self.moe_scale = moe_scale
-        self.history_scale = history_scale
-        self.current_scale = current_scale
-        self.mlp = nn.Linear(input_dim, input_dim)
-        self.extractor_his = extractor()
-        self.weight_linear = nn.Linear(input_dim, patch_num)
-        self.dropout = nn.Dropout(configs.dropout)
-        self.extractor_cur = extractor()
-        self.gate = nn.Linear(input_dim, 1)
-        self.norm = nn.LayerNorm(input_dim) if configs.aggregated_norm == 1 else None
-        self.moe = (
-            MOE(expert_num=configs.expert_num, input_dim=input_dim, div=configs.kan_div)
-            if configs.expert_num > 0 and moe_scale > 0
-            else None
-        )
-
-    def forward(self, x, return_analysis=False):
-        origin = x
-        if self.moe is not None:
-            x = x - self.moe_scale * self.moe(x)
-
-        if return_analysis:
-            history, history_components = self.extractor_his(x, return_components=True)
-            current_features, current_components = self.extractor_cur(
-                origin, return_components=True
-            )
-        else:
-            history = self.extractor_his(x)
-            current_features = self.extractor_cur(origin)
-
-        current_weight = self.gate(current_features).repeat(1, 1, origin.shape[-1])
-        weight = self.weight_linear(history).softmax(dim=-1)
-        aggregated = torch.matmul(torch.tril(weight, diagonal=0), x)
-
-        history_out = self.dropout(self.mlp(aggregated))
-        current_out = self.dropout(current_weight) * x
-        out = self.history_scale * history_out + self.current_scale * current_out
-        if self.norm is not None:
-            out = self.norm(out)
-        if return_analysis:
-            return out, x, {
-                "stable_input": x,
-                "history": history,
-                "current_features": current_features,
-                "history_components": history_components,
-                "current_components": current_components,
-                "aggregation_weight": weight,
-                "aggregated": aggregated,
-                "history_out": history_out,
-                "current_weight": current_weight,
-                "current_out": current_out,
-                "tfs_out": out,
-            }
-        return out, x
-
-
 class Attention(nn.Module):
     def __init__(self, d_model, heads, dropout=0.1):
         super().__init__()
@@ -476,112 +388,32 @@ class DTAF(nn.Module):
         self.patch_num = int(
             (self.config.seq_len - self.config.patch_len) / self.config.stride + 2
         )
-        self.tfs_variant = getattr(self.config, "tfs_variant", "original")
-        if self.tfs_variant not in ["original", "decoupled"]:
-            raise ValueError("tfs_variant must be one of: original, decoupled")
-        self.drop = nn.Dropout(self.config.dropout)
-        self.norm = nn.LayerNorm(self.config.d_model)
+        self.tfss = nn.ModuleList(
+            [
+                TFS(self.config.d_model, self.config, self.patch_num)
+                for _ in range(self.config.e_layers)
+            ]
+        )
+        self.predictor = Predictor(
+            2 * self.config.d_model * self.patch_num,
+            self.config.pred_len,
+            self.config.dropout,
+        )
+        self.patch_embedding = PatchEmbedding(
+            self.config.d_model,
+            self.config.patch_len,
+            self.config.stride,
+            self.config.stride,
+            self.config.dropout,
+        )
+        self.temporal_attention = Attention(
+            self.config.d_model, self.config.heads, self.config.dropout
+        )
         self.frequency_attention = Attention(
             self.config.d_model, self.config.heads, self.config.dropout
         )
-
-        if self.tfs_variant == "original":
-            self.tfss = nn.ModuleList(
-                [
-                    TFS(self.config.d_model, self.config, self.patch_num)
-                    for _ in range(self.config.e_layers)
-                ]
-            )
-            self.predictor = Predictor(
-                2 * self.config.d_model * self.patch_num,
-                self.config.pred_len,
-                self.config.dropout,
-            )
-            self.patch_embedding = PatchEmbedding(
-                self.config.d_model,
-                self.config.patch_len,
-                self.config.stride,
-                self.config.stride,
-                self.config.dropout,
-            )
-            self.temporal_attention = Attention(
-                self.config.d_model, self.config.heads, self.config.dropout
-            )
-        else:
-            self.input_decomp = SeriesDecomp(self.config.moving_avg)
-            self.trend_patch_embedding = PatchEmbedding(
-                self.config.d_model,
-                self.config.patch_len,
-                self.config.stride,
-                self.config.stride,
-                self.config.dropout,
-            )
-            self.seasonal_patch_embedding = PatchEmbedding(
-                self.config.d_model,
-                self.config.patch_len,
-                self.config.stride,
-                self.config.stride,
-                self.config.dropout,
-            )
-            trend_moe_scale = self._moe_scale(getattr(self.config, "trend_moe", "none"))
-            seasonal_moe_scale = self._moe_scale(
-                getattr(self.config, "seasonal_moe", "full")
-            )
-            self.trend_tfss = nn.ModuleList(
-                [
-                    BranchTFS(
-                        self.config.d_model,
-                        self.config,
-                        self.patch_num,
-                        extractor=lambda: SimpleExtractor(self.config.d_model),
-                        moe_scale=trend_moe_scale,
-                        history_scale=1.0,
-                        current_scale=self.config.trend_current_scale,
-                    )
-                    for _ in range(self.config.e_layers)
-                ]
-            )
-            self.seasonal_tfss = nn.ModuleList(
-                [
-                    BranchTFS(
-                        self.config.d_model,
-                        self.config,
-                        self.patch_num,
-                        extractor=lambda: LinearExtractor(self.config),
-                        moe_scale=seasonal_moe_scale,
-                        history_scale=self.config.seasonal_history_scale,
-                        current_scale=1.0,
-                    )
-                    for _ in range(self.config.e_layers)
-                ]
-            )
-            self.trend_attention = Attention(
-                self.config.d_model, self.config.heads, self.config.dropout
-            )
-            self.seasonal_attention = Attention(
-                self.config.d_model, self.config.heads, self.config.dropout
-            )
-            if self.config.decouple_fusion == "gated":
-                self.fusion_gate = nn.Linear(3 * self.config.d_model, 3)
-            elif self.config.decouple_fusion != "sum":
-                raise ValueError("decouple_fusion must be one of: sum, gated")
-            self.trend_norm = nn.LayerNorm(self.config.d_model)
-            self.seasonal_norm = nn.LayerNorm(self.config.d_model)
-            self.predictor = Predictor(
-                self.config.d_model * self.patch_num,
-                self.config.pred_len,
-                self.config.dropout,
-            )
-
-    @staticmethod
-    def _moe_scale(mode):
-        if mode == "none":
-            return 0.0
-        if mode == "weak":
-            return 0.1
-        if mode == "full":
-            return 1.0
-        raise ValueError("MOE mode must be one of: none, weak, full")
+        self.drop = nn.Dropout(self.config.dropout)
+        self.norm = nn.LayerNorm(self.config.d_model)
 
     @staticmethod
     def _normalize(x):
@@ -620,9 +452,6 @@ class DTAF(nn.Module):
         return out
 
     def forward(self, x_enc, return_analysis=False):
-        if self.tfs_variant == "decoupled":
-            return self._forward_decoupled(x_enc, return_analysis)
-
         batch_size, _, n_vars = x_enc.size()
         x_enc, means, stdev = self._normalize(x_enc)
 
@@ -665,83 +494,6 @@ class DTAF(nn.Module):
         enc_out = torch.cat([h_t, h_f], dim=-2)
         out = self._predict(enc_out, batch_size, n_vars, means, stdev)
         if return_analysis:
-            analysis["prediction"] = out
-            return out, stables, analysis
-        return out, stables
-
-    def _forward_decoupled(self, x_enc, return_analysis=False):
-        batch_size, _, n_vars = x_enc.size()
-        x_enc, means, stdev = self._normalize(x_enc)
-        seasonal_raw, trend_raw = self.input_decomp(x_enc)
-
-        h_trend, _ = self.trend_patch_embedding(trend_raw.transpose(1, 2))
-        h_seasonal, _ = self.seasonal_patch_embedding(seasonal_raw.transpose(1, 2))
-        stables = None
-        analysis = None
-        if return_analysis:
-            analysis = {
-                "normalized_input": x_enc,
-                "trend_raw": trend_raw,
-                "seasonal_raw": seasonal_raw,
-                "trend_patch_embedding": h_trend,
-                "seasonal_patch_embedding": h_seasonal,
-                "layers": [],
-            }
-
-        for trend_tfs, seasonal_tfs in zip(self.trend_tfss, self.seasonal_tfss):
-            trend_input = h_trend
-            seasonal_input = h_seasonal
-            if return_analysis:
-                trend_agg, trend_stable, trend_analysis = trend_tfs(
-                    h_trend, return_analysis=True
-                )
-                seasonal_agg, stables, seasonal_analysis = seasonal_tfs(
-                    h_seasonal, return_analysis=True
-                )
-            else:
-                trend_agg, trend_stable = trend_tfs(h_trend)
-                seasonal_agg, stables = seasonal_tfs(h_seasonal)
-            h_trend = self.trend_norm(self.drop(trend_agg) + h_trend)
-            h_seasonal = self.seasonal_norm(self.drop(seasonal_agg) + h_seasonal)
-            if return_analysis:
-                trend_analysis["layer_input"] = trend_input
-                trend_analysis["layer_output"] = h_trend
-                seasonal_analysis["layer_input"] = seasonal_input
-                seasonal_analysis["layer_output"] = h_seasonal
-                analysis["layers"].append(
-                    {"trend": trend_analysis, "seasonal": seasonal_analysis}
-                )
-
-        h_f, wave, topk_indices = self._frequency_wave(h_seasonal)
-        h_trend = self.trend_attention(h_trend)
-        h_seasonal = self.seasonal_attention(h_seasonal)
-        h_f = self.frequency_attention(h_f)
-
-        if self.config.decouple_fusion == "sum":
-            enc_out = h_trend + h_seasonal + h_f
-            fusion_alpha = None
-        else:
-            pooled = torch.cat(
-                [h_trend.mean(dim=1), h_seasonal.mean(dim=1), h_f.mean(dim=1)],
-                dim=-1,
-            )
-            fusion_alpha = self.fusion_gate(pooled).softmax(dim=-1)
-            alpha = fusion_alpha.unsqueeze(-1).unsqueeze(-1)
-            enc_out = (
-                alpha[:, 0] * h_trend
-                + alpha[:, 1] * h_seasonal
-                + alpha[:, 2] * h_f
-            )
-
-        out = self._predict(enc_out, batch_size, n_vars, means, stdev)
-        if return_analysis:
-            analysis["trend_branch"] = h_trend
-            analysis["seasonal_branch"] = h_seasonal
-            analysis["frequency_branch"] = h_f
-            analysis["wave"] = wave
-            analysis["topk_indices"] = topk_indices
-            analysis["stables"] = stables
-            analysis["fusion_alpha"] = fusion_alpha
             analysis["prediction"] = out
             return out, stables, analysis
         return out, stables

@@ -483,14 +483,22 @@ def append_trend_summary(
     selected_columns: Sequence[str],
 ) -> None:
     n_channels = len(selected_columns)
-    if "trend_raw" in analysis and "seasonal_raw" in analysis:
-        trend = to_numpy(analysis["trend_raw"])
-        seasonal = to_numpy(analysis["seasonal_raw"])
-        if trend is not None and seasonal is not None:
-            trend_std = trend.std(axis=1)
-            seasonal_std = seasonal.std(axis=1)
-            trend_abs = np.abs(trend).mean(axis=1)
-            seasonal_abs = np.abs(seasonal).mean(axis=1)
+    for layer_index, layer in enumerate(analysis["layers"]):
+        for branch_name in ["history_components", "current_components"]:
+            components = layer[branch_name]
+            trend = to_numpy(components["trend_init"])
+            seasonal = to_numpy(components["seasonal_init"])
+            if trend is None or seasonal is None:
+                continue
+            batch_size = len(batch_indices)
+            trend = trend.reshape(batch_size, n_channels, trend.shape[-2], trend.shape[-1])
+            seasonal = seasonal.reshape(
+                batch_size, n_channels, seasonal.shape[-2], seasonal.shape[-1]
+            )
+            trend_std = trend.std(axis=(2, 3))
+            seasonal_std = seasonal.std(axis=(2, 3))
+            trend_abs = np.abs(trend).mean(axis=(2, 3))
+            seasonal_abs = np.abs(seasonal).mean(axis=(2, 3))
             trend_ratio = trend_abs / (trend_abs + seasonal_abs + 1e-8)
 
             for batch_pos, sample_index in enumerate(batch_indices):
@@ -498,74 +506,18 @@ def append_trend_summary(
                     rows.append(
                         {
                             "sample": int(sample_index),
-                            "layer": -1,
-                            "stream": "input",
-                            "branch": "input_decomp",
+                            "layer": layer_index,
+                            "branch": branch_name.replace("_components", ""),
                             "channel": channel_name,
                             "trend_std": float(trend_std[batch_pos, channel_index]),
-                            "seasonal_std": float(
-                                seasonal_std[batch_pos, channel_index]
-                            ),
-                            "trend_abs_mean": float(
-                                trend_abs[batch_pos, channel_index]
-                            ),
+                            "seasonal_std": float(seasonal_std[batch_pos, channel_index]),
+                            "trend_abs_mean": float(trend_abs[batch_pos, channel_index]),
                             "seasonal_abs_mean": float(
                                 seasonal_abs[batch_pos, channel_index]
                             ),
-                            "trend_ratio": float(
-                                trend_ratio[batch_pos, channel_index]
-                            ),
+                            "trend_ratio": float(trend_ratio[batch_pos, channel_index]),
                         }
                     )
-
-    for layer_index, layer in enumerate(analysis["layers"]):
-        layer_items = [("tfs", layer)]
-        if "trend" in layer or "seasonal" in layer:
-            layer_items = [
-                (name, value)
-                for name, value in layer.items()
-                if isinstance(value, dict)
-            ]
-        for stream_name, stream in layer_items:
-            for branch_name in ["history_components", "current_components"]:
-                if branch_name not in stream:
-                    continue
-                components = stream[branch_name]
-                if "trend_init" not in components or "seasonal_init" not in components:
-                    continue
-                trend = to_numpy(components["trend_init"])
-                seasonal = to_numpy(components["seasonal_init"])
-                if trend is None or seasonal is None:
-                    continue
-                batch_size = len(batch_indices)
-                trend = trend.reshape(batch_size, n_channels, trend.shape[-2], trend.shape[-1])
-                seasonal = seasonal.reshape(
-                    batch_size, n_channels, seasonal.shape[-2], seasonal.shape[-1]
-                )
-                trend_std = trend.std(axis=(2, 3))
-                seasonal_std = seasonal.std(axis=(2, 3))
-                trend_abs = np.abs(trend).mean(axis=(2, 3))
-                seasonal_abs = np.abs(seasonal).mean(axis=(2, 3))
-                trend_ratio = trend_abs / (trend_abs + seasonal_abs + 1e-8)
-
-                for batch_pos, sample_index in enumerate(batch_indices):
-                    for channel_index, channel_name in enumerate(selected_columns):
-                        rows.append(
-                            {
-                                "sample": int(sample_index),
-                                "layer": layer_index,
-                                "stream": stream_name,
-                                "branch": branch_name.replace("_components", ""),
-                                "channel": channel_name,
-                                "trend_std": float(trend_std[batch_pos, channel_index]),
-                                "seasonal_std": float(seasonal_std[batch_pos, channel_index]),
-                                "trend_abs_mean": float(trend_abs[batch_pos, channel_index]),
-                                "seasonal_abs_mean": float(
-                                    seasonal_abs[batch_pos, channel_index]
-                                ),
-                                "trend_ratio": float(trend_ratio[batch_pos, channel_index]),
-                            }
-                        )
 
 
 @torch.no_grad()
@@ -653,12 +605,6 @@ def build_model(args, n_features: int) -> DTAF:
         aggregated_norm=args.aggregated_norm,
         expert_num=args.expert_num,
         kan_div=args.kan_div,
-        tfs_variant=args.tfs_variant,
-        trend_moe=args.trend_moe,
-        seasonal_moe=args.seasonal_moe,
-        trend_current_scale=args.trend_current_scale,
-        seasonal_history_scale=args.seasonal_history_scale,
-        decouple_fusion=args.decouple_fusion,
     )
     return DTAF(config)
 
@@ -952,12 +898,6 @@ def parse_args():
     parser.add_argument("--aggregated_norm", type=int, default=1)
     parser.add_argument("--expert_num", type=int, default=2)
     parser.add_argument("--kan_div", type=int, default=4)
-    parser.add_argument("--tfs_variant", choices=["original", "decoupled"], default="original")
-    parser.add_argument("--trend_moe", choices=["none", "weak", "full"], default="none")
-    parser.add_argument("--seasonal_moe", choices=["none", "weak", "full"], default="full")
-    parser.add_argument("--trend_current_scale", type=float, default=0.1)
-    parser.add_argument("--seasonal_history_scale", type=float, default=0.2)
-    parser.add_argument("--decouple_fusion", choices=["sum", "gated"], default="sum")
     parser.add_argument("--sigma", type=float, default=0.0)
     parser.add_argument("--r_dropout", type=float, default=1e-4)
     parser.add_argument("--kl", type=float, default=0.0)

@@ -29,7 +29,7 @@ python -u run.py \
   --dec_in 7 \
   --c_out 7 \
   --des 'Exp' \
-  --batch_size 32 \
+  --batch_size 256 \
   --d_model 32 \
   --d_ff 512 \
   --dropout 0.1 \
@@ -66,7 +66,7 @@ python -u run.py \
   --dec_in 7 \
   --c_out 7 \
   --des 'Exp' \
-  --batch_size 32 \
+  --batch_size 256 \
   --d_model 32 \
   --d_ff 512 \
   --dropout 0.1 \
@@ -103,7 +103,7 @@ python -u run.py \
   --dec_in 7 \
   --c_out 7 \
   --des 'Exp' \
-  --batch_size 32 \
+  --batch_size 256 \
   --d_model 32 \
   --d_ff 512 \
   --dropout 0.1 \
@@ -140,7 +140,7 @@ python -u run.py \
   --dec_in 7 \
   --c_out 7 \
   --des 'Exp' \
-  --batch_size 32 \
+  --batch_size 256 \
   --d_model 32 \
   --d_ff 512 \
   --dropout 0.1 \
