@@ -46,7 +46,9 @@ python run.py \
 ```
 
 The best checkpoint is saved to `./checkpoints/dtaf_best.pt`, and metrics are
-saved to `./checkpoints/metrics.json`.
+saved to `./checkpoints/metrics.json`. Validation and test MAE/MSE are reported
+on the standardized scale used for training, matching the usual benchmark
+reporting convention.
 
 To also write test-window predictions:
 

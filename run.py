@@ -338,8 +338,6 @@ def evaluate(
         output, _ = model(x)
         pred = output.index_select(-1, target_indices_tensor).cpu().numpy()
         true = y.index_select(-1, target_indices_tensor.cpu()).numpy()
-        pred = scaler.inverse_target(pred, target_indices)
-        true = scaler.inverse_target(true, target_indices)
         preds.append(pred)
         trues.append(true)
 
