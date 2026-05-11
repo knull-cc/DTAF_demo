@@ -321,7 +321,7 @@ class TFS(nn.Module):
             history = self.extractor_his(x)
             current_features = self.extractor_cur(origin)
 
-        current_weight = self.gate(current_features).repeat(
+        current_weight = torch.sigmoid(self.gate(current_features)).repeat(
             1, 1, origin.shape[-1]
         )
         weight = self.weight_linear(history).softmax(dim=-1)
@@ -483,7 +483,7 @@ class DTAF(nn.Module):
         h_f, wave, topk_indices = self._frequency_wave(enc_out_tfs)
 
         h_f = self.frequency_attention(h_f)
-        h_t = self.frequency_attention(h_t)
+        h_t = self.temporal_attention(h_t)
         if return_analysis:
             analysis["tfs_output"] = enc_out_tfs
             analysis["wave"] = wave
