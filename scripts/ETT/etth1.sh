@@ -8,14 +8,11 @@ export CUDA_VISIBLE_DEVICES=0
 model_name=DTAF
 root_path=./dataset/ETT-small/
 
-echo "--------------------------------------------------------------------------------"
-echo "start stage: ETTh1_512_96"
-echo "--------------------------------------------------------------------------------"
 python -u run.py \
   --is_training 1 \
   --root_path $root_path \
   --data_path ETTh1.csv \
-  --model_id ETTh1_512_96 \
+  --model_id ETTh1_96_96 \
   --model $model_name \
   --data ETTh1 \
   --features M \
@@ -45,20 +42,14 @@ python -u run.py \
   --expert_num 2 \
   --kan_div 8 \
   --kl 0.01 \
-  --checkpoints ./checkpoints/ETTh1_512_96 \
+  --checkpoints ./checkpoints/ETTh1_96_96 \
   --itr 1
-echo "--------------------------------------------------------------------------------"
-echo "finished stage: ETTh1_512_96"
-echo "--------------------------------------------------------------------------------"
 
-echo "--------------------------------------------------------------------------------"
-echo "start stage: ETTh1_512_192"
-echo "--------------------------------------------------------------------------------"
 python -u run.py \
   --is_training 1 \
   --root_path $root_path \
   --data_path ETTh1.csv \
-  --model_id ETTh1_512_192 \
+  --model_id ETTh1_96_192 \
   --model $model_name \
   --data ETTh1 \
   --features M \
@@ -88,20 +79,14 @@ python -u run.py \
   --expert_num 2 \
   --kan_div 2 \
   --kl 0.1 \
-  --checkpoints ./checkpoints/ETTh1_512_192 \
+  --checkpoints ./checkpoints/ETTh1_96_192 \
   --itr 1
-echo "--------------------------------------------------------------------------------"
-echo "finished stage: ETTh1_512_192"
-echo "--------------------------------------------------------------------------------"
 
-echo "--------------------------------------------------------------------------------"
-echo "start stage: ETTh1_512_336"
-echo "--------------------------------------------------------------------------------"
 python -u run.py \
   --is_training 1 \
   --root_path $root_path \
   --data_path ETTh1.csv \
-  --model_id ETTh1_512_336 \
+  --model_id ETTh1_96_336 \
   --model $model_name \
   --data ETTh1 \
   --features M \
@@ -131,20 +116,14 @@ python -u run.py \
   --expert_num 2 \
   --kan_div 4 \
   --kl 0.01 \
-  --checkpoints ./checkpoints/ETTh1_512_336 \
+  --checkpoints ./checkpoints/ETTh1_96_336 \
   --itr 1
-echo "--------------------------------------------------------------------------------"
-echo "finished stage: ETTh1_512_336"
-echo "--------------------------------------------------------------------------------"
 
-echo "--------------------------------------------------------------------------------"
-echo "start stage: ETTh1_512_720"
-echo "--------------------------------------------------------------------------------"
 python -u run.py \
   --is_training 1 \
   --root_path $root_path \
   --data_path ETTh1.csv \
-  --model_id ETTh1_512_720 \
+  --model_id ETTh1_96_720 \
   --model $model_name \
   --data ETTh1 \
   --features M \
@@ -174,8 +153,5 @@ python -u run.py \
   --expert_num 2 \
   --kan_div 4 \
   --kl 0.5 \
-  --checkpoints ./checkpoints/ETTh1_512_720 \
+  --checkpoints ./checkpoints/ETTh1_96_720 \
   --itr 1
-echo "--------------------------------------------------------------------------------"
-echo "finished stage: ETTh1_512_720"
-echo "--------------------------------------------------------------------------------"
