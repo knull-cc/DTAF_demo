@@ -1,61 +1,70 @@
+# DTAF
 
+This repository is a compact, executable PyTorch project for DTAF. The original
+benchmark framework, JSON configs, experiment shell scripts, dashboards, and
+figures have been removed. The project now has one runtime entry point:
+`run.py`.
 
-#  [AAAI 2026] Towards Non-Stationary Time Series Forecasting with Temporal Stabilization and Frequency Differencing
+## Install
 
-<div align="center">
- 
- [![Python](https://img.shields.io/badge/Python-3.8%2B-blue)](https://www.python.org/) [![PyTorch](https://img.shields.io/badge/PyTorch-2.4.1-blue)](https://pytorch.org/) 
- ![Stars](https://img.shields.io/github/stars/decisionintelligence/DTAF)
-
-This code is a PyTorch implementation of our AAAI'26 paper "Towards Non-Stationary Time Series Forecasting with Temporal Stabilization and Frequency Differencing". [[arXiv]](https://arxiv.org/abs/2511.08229)
-</div>
-
-## Introduction
-
-***DTAF***, a dual-branch framework that addresses non-stationarity in both the temporal and frequency domains. For the temporal domain, the ***Temporal Stabilizing Fusion*** (TFS) module employs a non-stationary mix of experts (MOE) filter to disentangle and suppress temporal non-stationary patterns while preserving long-term dependencies. For the frequency domain, the ***Frequency Wave Modeling*** (FWM) module applies frequency differencing to dynamically highlight components with significant spectral shifts. By fusing the complementary outputs of TFS and FWM, DTAF generates robust forecasts that adapt to both temporal and frequency domain non-stationarity.  
-
-![The framework of DTAF](./figs/framework.png)
-
-## Quickstart
-1. Requirements
-
-Install the dependencies with the following command:
-
-```shell
+```bash
 pip install -r requirements.txt
 ```
 
-2. Data preparation
+## Data Format
 
-You can obtain the well-preprocessed datasets from [Google Drive](https://drive.google.com/file/d/1vgpOmAygokoUt235piWKUjfwao6KwLv7/view?usp=drive_link) or [Baidu Drive](https://pan.baidu.com/s/1ycq7ufOD2eFOjDkjr0BfSg?pwd=bpry). Then, place the downloaded data under the folder `./dataset`. 
+Datasets follow the iTransformer CSV convention:
 
-3. Train and evaluate the model
-
-- To see the model structure of DTAF,  [click here](./ts_benchmark/baselines/dtaf/model/DTAF_model.py).
-- We provide all the experiment scripts for DTAF and other baselines under the folder `./scripts/DTAF`.  
-
-## Results
-We utilize the Time Series Forecasting Benchmark ([TFB](https://github.com/decisionintelligence/TFB)) code repository as a unified evaluation framework, providing access to **all baseline codes, scripts, and results**. Following the settings in TFB, we do not apply the **"Drop Last"** trick to ensure a fair comparison.
-
-
-### Results of comprehensive parameter searches
-Results from **comprehensive parameter searches** for the long-term forecasting task. The look-back window underwent testing with lengths **36 and 104** for NN5, ILI, Covid-19, and Wike2000, and **96, 336, and 512** for all other datasets. **We search for the best results from these look-back windows and report the best results.**
-
-Extensive experiments on 11 real-world datasets from 6 different application domains demonstrate that DTAF achieves state-of-the-art(SOTA) performance. We show the full main results of the 11 below:
-
-<div align="center">
-<img alt="Logo" src="figs/full_results.png" width="100%"/>
-</div>
-
-## Citing DTAF
-If you find this resource helpful, please consider to cite our research:
-
+```csv
+date,OT,HUFL,HULL,MUFL,MULL
+2016-07-01 00:00:00,1.0,2.0,3.0,4.0,5.0
+2016-07-01 01:00:00,1.1,2.1,3.1,4.1,5.1
 ```
-@inproceedings{
-    lu2025dtaf,
-    title={Towards Non-Stationary Time Series Forecasting with Temporal Stabilization and Frequency Differencing},
-    author={Junkai Lu and Peng Chen and Chenjuan Guo and Yang Shu and Meng Wang and Bin Yang},
-    booktitle={AAAI},
-    year={2026}
-}
+
+Rules:
+
+- The first column must be `date`.
+- All remaining columns must be numeric variables.
+- `--features S` trains on only `--target`.
+- `--features M` trains and evaluates all variables.
+- `--features MS` trains with all variables but evaluates only `--target`.
+
+Place data under `./dataset` or pass another `--root_path`.
+
+## Train And Test
+
+```bash
+python run.py \
+  --root_path ./dataset \
+  --data_path ETTh1.csv \
+  --features M \
+  --target OT \
+  --seq_len 96 \
+  --pred_len 96 \
+  --train_epochs 10 \
+  --batch_size 32
 ```
+
+The best checkpoint is saved to `./checkpoints/dtaf_best.pt`, and metrics are
+saved to `./checkpoints/metrics.json`.
+
+To also write test-window predictions:
+
+```bash
+python run.py --root_path ./dataset --data_path ETTh1.csv --save_predictions
+```
+
+## Evaluate Or Predict From A Checkpoint
+
+```bash
+python run.py --mode test --root_path ./dataset --data_path ETTh1.csv
+python run.py --mode predict --root_path ./dataset --data_path ETTh1.csv
+```
+
+`predict` writes the next `--pred_len` steps to
+`./checkpoints/future_predictions.csv`.
+
+## Files
+
+- `run.py`: CLI, data loading, train/validation/test loop, checkpointing.
+- `dtaf/model.py`: standalone DTAF model implementation.
