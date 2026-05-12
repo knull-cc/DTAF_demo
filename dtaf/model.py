@@ -294,7 +294,10 @@ class TFS(nn.Module):
     def __init__(self, input_dim, configs, patch_num):
         super().__init__()
         self.configs = configs
-        self.mlp = nn.Linear(input_dim, input_dim)
+        self.mlp = nn.Sequential(
+            nn.Linear(input_dim, input_dim),
+            nn.GELU(),
+        )
         self.extractor_his = LinearExtractor(configs)
         self.weight_linear = nn.Linear(input_dim, patch_num)
         self.dropout = nn.Dropout(configs.dropout)
@@ -423,15 +426,21 @@ class DTAF(nn.Module):
         return x / stdev, means, stdev
 
     def _frequency_wave(self, enc_out):
-        freq = torch.fft.rfft(enc_out, dim=1)
-        wave = torch.zeros_like(freq.real)
+        freq = torch.fft.rfft(enc_out, dim=-1)
+        wave = torch.zeros(
+            enc_out.shape[0],
+            enc_out.shape[1],
+            freq.shape[-1],
+            device=enc_out.device,
+            dtype=enc_out.dtype,
+        )
         wave[:, 1:, :] = torch.exp(torch.abs(freq[:, 1:, :]) - torch.abs(freq[:, :-1, :]))
-        top_k = min(max(1, self.config.k), wave.shape[1])
-        _, topk_indices = torch.topk(wave, top_k, dim=1)
+        top_k = min(max(1, self.config.k), wave.shape[-1])
+        _, topk_indices = torch.topk(wave, top_k, dim=-1)
         mask = torch.zeros_like(freq, dtype=torch.bool)
-        mask.scatter_(dim=1, index=topk_indices, value=True)
+        mask.scatter_(dim=-1, index=topk_indices, value=True)
         filtered_freq = torch.where(mask, freq, torch.zeros_like(freq))
-        h_f = torch.fft.irfft(filtered_freq, n=enc_out.size(1), dim=1)
+        h_f = torch.fft.irfft(filtered_freq, n=enc_out.size(-1), dim=-1)
         h_f[:, 0, :] = enc_out[:, 0, :]
         return h_f, wave, topk_indices
 
