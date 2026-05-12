@@ -225,13 +225,14 @@ def read_itransformer_csv(
 
 
 def split_borders(n: int, args) -> Dict[str, Tuple[int, int]]:
-    if args.split == "ett":
-        train_end = 12 * 30 * 24
-        val_end = train_end + 4 * 30 * 24
-        test_end = val_end + 4 * 30 * 24
+    if args.split in ["ett", "ettm"]:
+        rows_per_hour = 4 if args.split == "ettm" else 1
+        train_end = 12 * 30 * 24 * rows_per_hour
+        val_end = train_end + 4 * 30 * 24 * rows_per_hour
+        test_end = val_end + 4 * 30 * 24 * rows_per_hour
         if n < test_end:
             raise ValueError(
-                f"ETT split requires at least {test_end} rows, but dataset has {n}."
+                f"{args.split} split requires at least {test_end} rows, but dataset has {n}."
             )
         return {
             "train": (0, train_end),
@@ -906,7 +907,7 @@ def parse_args():
     parser.add_argument("--train_ratio", type=float, default=0.7)
     parser.add_argument("--val_ratio", type=float, default=0.1)
     parser.add_argument("--test_ratio", type=float, default=0.2)
-    parser.add_argument("--split", type=str, default="ratio", choices=["ratio", "ett"])
+    parser.add_argument("--split", type=str, default="ratio", choices=["ratio", "ett", "ettm"])
     parser.add_argument("--drop_last", action="store_true")
 
     parser.add_argument("--checkpoints", "--output_dir", dest="output_dir", type=str, default="./checkpoints")
