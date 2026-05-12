@@ -606,6 +606,8 @@ def build_model(args, n_features: int) -> DTAF:
         aggregated_norm=args.aggregated_norm,
         expert_num=args.expert_num,
         kan_div=args.kan_div,
+        history_mlp=args.history_mlp,
+        fft_dim=args.fft_dim,
     )
     return DTAF(config)
 
@@ -899,6 +901,8 @@ def parse_args():
     parser.add_argument("--aggregated_norm", type=int, default=1)
     parser.add_argument("--expert_num", type=int, default=2)
     parser.add_argument("--kan_div", type=int, default=4)
+    parser.add_argument("--history_mlp", choices=["linear", "gelu"], default="gelu")
+    parser.add_argument("--fft_dim", choices=["feature", "time"], default="feature")
     parser.add_argument("--sigma", type=float, default=0.0)
     parser.add_argument("--r_dropout", type=float, default=1e-4)
     parser.add_argument("--kl", type=float, default=0.0)
