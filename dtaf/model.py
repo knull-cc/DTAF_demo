@@ -423,25 +423,15 @@ class DTAF(nn.Module):
         return x / stdev, means, stdev
 
     def _frequency_wave(self, enc_out):
-        # dim=-1 -> dim=1
         freq = torch.fft.rfft(enc_out, dim=1)
-        wave = torch.zeros(
-            enc_out.shape[0],
-            enc_out.shape[1],
-            freq.shape[-1],
-            device=enc_out.device,
-            dtype=enc_out.dtype,
-        )
+        wave = torch.zeros_like(freq.real)
         wave[:, 1:, :] = torch.exp(torch.abs(freq[:, 1:, :]) - torch.abs(freq[:, :-1, :]))
-        top_k = min(max(1, self.config.k), wave.shape[-1])
-        # dim=-1 -> dim=1
+        top_k = min(max(1, self.config.k), wave.shape[1])
         _, topk_indices = torch.topk(wave, top_k, dim=1)
         mask = torch.zeros_like(freq, dtype=torch.bool)
-        # dim=-1 -> dim=1
         mask.scatter_(dim=1, index=topk_indices, value=True)
         filtered_freq = torch.where(mask, freq, torch.zeros_like(freq))
-        # dim=-1 -> dim=1
-        h_f = torch.fft.irfft(filtered_freq, n=enc_out.size(-1), dim=1)
+        h_f = torch.fft.irfft(filtered_freq, n=enc_out.size(1), dim=1)
         h_f[:, 0, :] = enc_out[:, 0, :]
         return h_f, wave, topk_indices
 
@@ -506,4 +496,3 @@ class DTAF(nn.Module):
         TFS = MLP(HistoryAggregation(MOE-filtered patch)) 
          + Gate(Features(original patch)) * MOE-filtered patch
 '''
-
